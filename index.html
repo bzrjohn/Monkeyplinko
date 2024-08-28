@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Plinko Game with Bouncing Monkey and Jackpot</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.18.0/matter.min.js"></script>
+    <style>
+        body {
+            background-color: #1e1a2b;
+            color: #ffffff;
+            font-family: 'Arial', sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+        }
+        #game-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        #canvas-container {
+            position: relative;
+            width: 400px;
+            height: 600px;
+        }
+        canvas {
+            background-color: #000000;
+        }
+        #multipliers {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            display: flex;
+            justify-content: space-around;
+            padding: 0 5px;
+        }
+        .multiplier {
+            font-size: 14px;
+            font-weight: bold;
+            color: #ffffff;
+            padding: 8px 0;
+            width: 24px;
+            text-align: center;
+            text-shadow: 1px 1px 2px rgba(0,0,0,0.8);
+            border-radius: 5px 5px 0 0;
+            box-shadow: 0 -2px 5px rgba(0,0,0,0.3);
+            margin: 0 1px;
+        }
+        #game-info {
+            margin-top: 20px;
+            text-align: center;
+        }
+        button, input {
+            margin: 10px;
+            padding: 10px;
+            font-size: 16px;
+        }
+        #drop-ball {
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            cursor: pointer;
+            border-radius: 5px;
+        }
+        #multi-drop {
+            background-color: #008CBA;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            text-align: center;
+            text-decoration: none;
+            display: inline-block;
+            font-size: 16px;
+            margin: 4px 2px;
+            cursor: pointer;
+            border-radius: 5px;
+        }
+        #betAmount {
+            background-color: #f2f2f2;
+            color: #333;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+        #irish-monkey {
+            position: absolute;
+            font-size: 40px;
+            z-index: 1000;
+            transition: all 0.5s ease;
+            animation: bounce 0.5s infinite alternate;
+        }
+        @keyframes bounce {
+            from { transform: translateY(0px); }
+            to { transform: translateY(-10px); }
+        }
+        .dollar-animation {
+            position: absolute;
+            font-size: 20px;
+            color: gold;
+            animation: float-up 1s ease-out;
+            pointer-events: none;
+        }
+        @keyframes float-up {
+            0% { transform: translateY(0); opacity: 1; }
+            100% { transform: translateY(-50px); opacity: 0; }
+        }
+        .firework {
+            position: absolute;
+            width: 5px;
+            height: 5px;
+            border-radius: 50%;
+            animation: explode 1s ease-out forwards;
+        }
+        @keyframes explode {
+            0% { transform: scale(1); opacity: 1; }
+            100% { transform: scale(20); opacity: 0; }
+        }
+    </style>
+</head>
+<body>
+    <div id="game-container">
+        <div id="canvas-container">
+            <div id="multipliers"></div>
+            <div id="irish-monkey">🐵</div>
+        </div>
+        <div id="game-info">
+            <div id="balance">Balance: $1000</div>
+            <div id="win-amount">Last Win: $0</div>
+            <div id="house-edge">House Edge: 0%</div>
+            <input type="number" id="betAmount" value="1" min="1" max="1000">
+            <button id="drop-ball" onclick="dropBall(parseInt(document.getElementById('betAmount').value))">DROP BALL</button>
+            <button id="multi-drop" onclick="dropMultipleBalls(100)">DROP 100 BALLS</button>
+        </div>
+    </div>
+    <script>
+        const { Engine, Render, World, Bodies, Events, Body, Vector, Vertices } = Matter;
+
+        const width = 400;
+        const height = 600;
+        const engine = Engine.create();
+        const render = Render.create({
+            element: document.getElementById('canvas-container'),
+            engine: engine,
+            options: {
+                width: width,
+                height: height,
+                wireframes: false,
+                background: '#000000'
+            }
+        });
+
+        const rows = 14;
+        const cols = 15;
+        const pegRadius = 3;
+        const ballRadius = 5;
+
+        let playerBalance = 1000;
+        const multipliers = [500, 25, 8, 0.5, 0.5, 0.2, 0.1, 0.1, 0.1, 0.2, 0.5, 0.5, 8, 25, 500];
+        const multiplierColors = [
+            '#800000', '#A52A2A', '#D2691E', '#FF8C00', '#FFD700',
+            '#ADFF2F', '#32CD32', '#00FA9A', '#00CED1', '#1E90FF',
+            '#4169E1', '#8A2BE2', '#9932CC', '#FF1493', '#800000'
+        ];
+        
+        const baseProbabilities = [
+            0.000001, 0.00001, 0.0001, 0.05,
+            0.1, 0.15, 0.2, 0.25, 0.2, 0.15,
+            0.1, 0.05, 0.0001, 0.00001, 0.000001
+        ];
+
+        const totalProb = baseProbabilities.reduce((a, b) => a + b, 0);
+        let multiplierProbabilities = baseProbabilities.map(p => p / totalProb);
+
+        let totalBet = 0;
+        let totalWon = 0;
+        const targetHouseEdge = 0.1;
+        const houseFee = 0.02;
+
+        const zoneHeight = 40;
+        const triangleHeight = height - zoneHeight;
+        const triangleBase = width;
+        const leftWall = Bodies.fromVertices(0, triangleHeight / 2, Vertices.fromPath(`0 0 0 ${triangleHeight} ${triangleBase / 2} ${triangleHeight}`), { 
+            isStatic: true, 
+            render: { fillStyle: 'transparent' },
+            friction: 0,
+            restitution: 0.5
+        });
+        const rightWall = Bodies.fromVertices(width, triangleHeight / 2, Vertices.fromPath(`0 0 0 ${triangleHeight} ${-triangleBase / 2} ${triangleHeight}`), { 
+            isStatic: true, 
+            render: { fillStyle: 'transparent' },
+            friction: 0,
+            restitution: 0.5
+        });
+        World.add(engine.world, [leftWall, rightWall]);
+
+        for (let row = 0; row < rows; row++) {
+            const pegsInRow = row + 2;
+            const rowWidth = (pegsInRow - 1) * (width / (cols - 1));
+            const startX = (width - rowWidth) / 2;
+            for (let col = 0; col < pegsInRow; col++) {
+                let x = startX + col * (width / (cols - 1));
+                let y = (row * triangleHeight) / rows + 50;
+                let peg = Bodies.circle(x, y, pegRadius, { 
+                    isStatic: true,
+                    render: { fillStyle: '#ffffff' }
+                });
+                World.add(engine.world, peg);
+            }
+        }
+
+        const zoneWidth = (width / multipliers.length) - 2;
+        for (let i = 0; i < multipliers.length; i++) {
+            let zone = Bodies.rectangle(
+                i * (zoneWidth + 2) + zoneWidth / 2 + 1,
+                height - zoneHeight / 2,
+                zoneWidth,
+                zoneHeight,
+                { 
+                    isStatic: true,
+                    isSensor: true,
+                    render: { fillStyle: multiplierColors[i] },
+                    multiplier: multipliers[i]
+                }
+            );
+            World.add(engine.world, zone);
+
+            const multiplierDiv = document.createElement('div');
+            multiplierDiv.className = 'multiplier';
+            multiplierDiv.textContent = multipliers[i] + 'x';
+            multiplierDiv.style.backgroundColor = multiplierColors[i];
+            document.getElementById('multipliers').appendChild(multiplierDiv);
+        }
+
+        let ballCount = 0;
+
+        function dropBall(betAmount) {
+            if (betAmount > playerBalance) {
+                alert("Insufficient balance!");
+                return false;
+            }
+            const feeAmount = betAmount * houseFee;
+            const actualBetAmount = betAmount - feeAmount;
+            playerBalance -= betAmount;
+            totalBet += actualBetAmount;
+            updateBalance();
+            updateHouseEdge();
+
+            let ball = Bodies.circle(width/2, 20, ballRadius, {
+                restitution: 0.3,
+                friction: 0.002,
+                density: 0.015,
+                render: { fillStyle: '#ffffff' },
+                betAmount: actualBetAmount
+            });
+            World.add(engine.world, ball);
+
+            ballCount++;
+            if (ballCount % 50 === 0) {
+                triggerJackpot();
+            }
+
+            return true;
+        }
+
+        function dropMultipleBalls(count) {
+            let betAmount = parseInt(document.getElementById('betAmount').value);
+            let totalBetAmount = betAmount * count;
+            
+            if (totalBetAmount > playerBalance) {
+                alert("Insufficient balance for multiple drops!");
+                return;
+            }
+
+            let droppedCount = 0;
+            let dropInterval = setInterval(() => {
+                if (droppedCount < count) {
+                    if (dropBall(betAmount)) {
+                        droppedCount++;
+                    } else {
+                        clearInterval(dropInterval);
+                    }
+                } else {
+                    clearInterval(dropInterval);
+                }
+            }, 100);
+        }
+
+        function updateBalance() {
+            document.getElementById('balance').textContent = `Balance: $${playerBalance.toFixed(2)}`;
+        }
+
+        function updateWinAmount(amount) {
+            document.getElementById('win-amount').textContent = `Last Win: $${amount.toFixed(2)}`;
+        }
+
+        function updateHouseEdge() {
+            const currentHouseEdge = calculateCurrentHouseEdge();
+            document.getElementById('house-edge').textContent = `House Edge: ${(currentHouseEdge * 100).toFixed(2)}%`;
+        }
+
+        function calculateCurrentHouseEdge() {
+            return totalBet > 0 ? (totalBet - totalWon) / totalBet : 0;
+        }
+
+        function adjustProbabilities() {
+            const currentHouseEdge = calculateCurrentHouseEdge();
+            const edgeDifference = targetHouseEdge - currentHouseEdge;
+            
+            const adjustmentFactor = 1 + edgeDifference * 0.2;
+            
+            let totalProb = 0;
+            for (let i = 0; i < multiplierProbabilities.length; i++) {
+                if (multipliers[i] <= 1) {
+                    multiplierProbabilities[i] *= adjustmentFactor;
+                } else {
+                    multiplierProbabilities[i] /= adjustmentFactor;
+                }
+                totalProb += multiplierProbabilities[i];
+            }
+            
+            for (let i = 0; i < multiplierProbabilities.length; i++) {
+                multiplierProbabilities[i] /= totalProb;
+            }
+        }
+
+        function createDollarAnimation(x, y) {
+            const dollar = document.createElement('div');
+            dollar.className = 'dollar-animation';
+            dollar.textContent = '$';
+            dollar.style.left = `${x}px`;
+            dollar.style.top = `${y}px`;
+            document.getElementById('canvas-container').appendChild(dollar);
+            setTimeout(() => dollar.remove(), 1000);
+        }
+
+        function triggerJackpot() {
+            const jackpotAmount = playerBalance * 20;
+            playerBalance += jackpotAmount;
+            updateBalance();
+            updateWinAmount(jackpotAmount);
+            createFireworks();
+            alert(`JACKPOT! You won $${jackpotAmount.toFixed(2)}!`);
+        }
+
+        function createFireworks() {
+            const container = document.getElementById('canvas-container');
+            const containerRect = container.getBoundingClientRect();
+            for (let i = 0; i < 50; i++) {
+                const firework = document.createElement('div');
+                firework.className = 'firework';
+                firework.style.left = `${Math.random() * containerRect.width}px`;
+                firework.style.top = `${Math.random() * containerRect.height}px`;
+                firework.style.backgroundColor = `hsl(${Math.random() * 360}, 100%, 50%)`;
+                container.appendChild(firework);
+                setTimeout(() => firework.remove(), 1000);
+            }
+        }
+
+        Events.on(engine, 'collisionStart', function(event) {
+            let pairs = event.pairs;
+            for (let i = 0; i < pairs.length; i++) {
+                let pair = pairs[i];
+                if (pair.bodyA.multiplier !== undefined && pair.bodyB.betAmount !== undefined) {
+                    let winAmount = pair.bodyB.betAmount * pair.bodyA.multiplier;
+                    playerBalance += winAmount;
+                    totalWon += winAmount;
+                    updateBalance();
+                    updateWinAmount(winAmount);
+                    updateHouseEdge();
+                    adjustProbabilities();
+                    createDollarAnimation(pair.bodyB.position.x, pair.bodyB.position.y);
+                    setTimeout(() => {
+                        World.remove(engine.world, pair.bodyB);
+                    }, 100);
+                }
+            }
+        });
+
+        Events.on(engine, 'afterUpdate', function() {
+            const balls = engine.world.bodies.filter(body => body.betAmount !== undefined);
+
+            balls.forEach(ball => {
+                if (ball.position.y > height - 150 && !ball.hasLanded) {
+                    const randomValue = Math.random();
+                    let cumulativeProb = 0;
+                    let targetIndex = 0;
+
+                    for (let i = 0; i < multiplierProbabilities.length; i++) {
+                        cumulativeProb += multiplierProbabilities[i];
+                        if (randomValue <= cumulativeProb) {                            targetIndex = i;
+                            break;
+                        }
+                    }
+
+                    const targetX = (targetIndex * (zoneWidth + 2)) + (zoneWidth / 2) + 1;
+                    const force = Vector.sub(Vector.create(targetX, height), ball.position);
+                    Body.applyForce(ball, ball.position, Vector.mult(Vector.normalise(force), 0.00015));
+                    ball.hasLanded = true;
+                }
+            });
+        });
+
+        // Irish Monkey
+        const monkey = document.getElementById('irish-monkey');
+        function moveMonkey() {
+            const containerRect = document.getElementById('canvas-container').getBoundingClientRect();
+            const x = Math.random() * (containerRect.width - 50);
+            const y = Math.random() * (containerRect.height - 50);
+            monkey.style.left = `${x}px`;
+            monkey.style.top = `${y}px`;
+            monkey.innerHTML = Math.random() > 0.5 ? '🐵' : '🙈';
+        }
+
+        setInterval(moveMonkey, 3000);
+
+        Engine.run(engine);
+        Render.run(render);
+    </script>
+</body>
+</html>
